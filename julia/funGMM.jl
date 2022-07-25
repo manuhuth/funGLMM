@@ -29,7 +29,7 @@ using ProgressMeter
 function get_dummy_beta_parameters_development(length_betas)
   betas = Vector{Float64}()
   for i in eachindex(length_betas)
-    append!(betas, rand(Uniform(-5, 5), length_betas[i]))#this will come from the function later
+    append!(betas, rand(Uniform(-20, 20), length_betas[i]))#this will come from the function later
   end
   return betas #maybe a good starting value function
 end
@@ -1006,7 +1006,7 @@ function compute_objective_function_value(betas, gammas, alphas, transformed_sig
 
     return  function_value + lambda * compute_penalty_sum_integrals(functional_covariates,
                              basis_type_weighting_betas, beta_parameter_dict,
-                             gauss_legendre_penalty_points), gradient
+                             gauss_legendre_penalty_points), gradient, function_value
 
   else
 
@@ -1106,12 +1106,25 @@ function get_optimization_results(starting_values, length_alphas, scalar_covaria
                               link_sigma_mu, link_sigma_mu_derivative,
                               lambda, parallel, gauss_legendre_penalty_points), starting_values,
                               autodiff=:forward)
-  return optimize(fn,
-                  #g!,
-                  lower, upper, starting_values,
-                  optimizer, Optim.Options(#show_trace = true, #show_every = 1,
-                  iterations=1000, g_tol = 10^(-6), f_tol = 10^(-20)))#,
-                   #store_trace=true, extended_trace=true, iterations = 3000))
+
+  fit = optimize(fn, #g!,
+                                      lower, upper, starting_values,
+                                      optimizer, Optim.Options(#show_trace = true, #show_every = 1,
+                                      iterations=1000, g_tol = 10^(-6), f_tol = 10^(-20)))#,
+                                      #store_trace=true, extended_trace=true, iterations = 3000))
+  parameter = Optim.minimizer(fit)
+  likelihood_value = get_wrapper_compute_objective_function_value(parameter, length_alphas, scalar_covariates,
+                                                          kappa, w_h, data_grouped, y_calc, length_betas_all,
+                                                          ordinal_values_low_to_high, t_variable, basis_type_weighting_betas,
+                                                          functional_covariates, functional_data, link, family,
+                                                          name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
+                                                          link_sigma_mu, link_sigma_mu_derivative,
+                                                          lambda, parallel, gauss_legendre_penalty_points)[3]
+  output = Dict("parameter" => parameter,
+                "log_likelihood" => -likelihood_value,
+                "fit" => fit)
+
+  return output
 end
 
 
@@ -1145,10 +1158,9 @@ function fun_glmm(formula, family, link, data, functional_data, beta_bases, star
 
   data_grouped = groupby(data, i_variable) #group by individuals
 
-  #create outputs
-  output = Dict()
+
   #obtain results of the penalized mll function
-  output["optimization"] = get_optimization_results(starting_values, length_alphas, scalar_covariates,
+  output = get_optimization_results(starting_values, length_alphas, scalar_covariates,
                               kappa, w_h, data_grouped, y_calc, length_betas_all,
                               ordinal_values_low_to_high, t_variable, beta_bases,
                               functional_covariates, functional_data, link, family,
@@ -1156,9 +1168,9 @@ function fun_glmm(formula, family, link, data, functional_data, beta_bases, star
                               gauss_legendre_penalty_points,
                               link_sigma_mu, link_sigma_mu_derivative, lambda,
                               parallel_likelihood_evaluation, optimizer)
-  output["parameter"] = estimated_parameters = Optim.minimizer(output["optimization"])
 
-
+  output["aic"] = compute_aic(length(output["parameter"]), output["log_likelihood"])
+  output["bic"] = compute_bic(length(output["parameter"]), nrow(data), output["log_likelihood"])
 
   if !isnothing(bootstrap) #idea of grouped influence boostrap?
     output["bootstrap"] = run_bootstrap(Array{Float64}(undef, bootstrap, length(starting_values)), bootstrap,
@@ -1177,6 +1189,14 @@ function fun_glmm(formula, family, link, data, functional_data, beta_bases, star
 
 end
 
+#--------------------------Model evaluation-------------------------------------
+function compute_bic(n_parameter, n_observations, log_likelihood)
+  return n_parameter*log(n_observations) - 2*log_likelihood
+end
+
+function compute_aic(n_parameter, log_likelihood)
+  return 2*n_parameter - 2 * log_likelihood
+end
 
 #--------------------------------Bootstrap--------------------------------------
 function run_bootstrap(store, bootstrap,
@@ -1197,7 +1217,7 @@ function run_bootstrap(store, bootstrap,
   l = Threads.SpinLock() #just for progressbar
 
   Threads.@threads for b in 1:bootstrap
-    store[b,:] = Optim.minimizer(run_bootstrap_b(1, length(data_grouped), length(data_grouped), true,
+    store[b,:] = run_bootstrap_b(1, length(data_grouped), length(data_grouped), true,
                                 starting_values, length_alphas,
                                 scalar_covariates,
                                 kappa, w_h, data_grouped, y_calc, length_betas_all,
@@ -1206,7 +1226,7 @@ function run_bootstrap(store, bootstrap,
                                 name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
                                 gauss_legendre_penalty_points,
                                 link_sigma_mu, link_sigma_mu_derivative, lambda,
-                                parallel_likelihood_evaluation, optimizer, i_variable))
+                                parallel_likelihood_evaluation, optimizer, i_variable)["parameter"]
 
     Threads.atomic_add!(jj, 1) #just for progressbar
     Threads.lock(l) #just for progressbar
@@ -1435,7 +1455,7 @@ function plot_results_confidence_intervals(bases_betas,
 
   B = basismatrix(basis_, ( 1:bases_betas[functional_covariates[1]]["memory"]))
   index_start = 1
-  global beta_est = B * estimated_parameters[:, (index_start+1):(index_start+length(basis_))]'
+  beta_est = B * estimated_parameters[:, (index_start+1):(index_start+length(basis_))]'
   beta_true = B * true_values[(index_start+1):(index_start+length(basis_))]
   beta_start = B * start_values[(index_start+1):(index_start+length(basis_))]
 
@@ -1454,7 +1474,7 @@ end
 const sigma_mu = 1.0
 const lower_bound_gamma = -0.5
 const upper_bound_gamma = 0.5
-const number_individuals = 800
+const number_individuals = 5000
 const min_time = -600
 const max_time = 811
 const weights_y_data = [1/3, 1/3, 1/3]
@@ -1512,8 +1532,7 @@ const start_values_noise =  zeros(length(true_values)) .+ 0.01 #true_values + ra
 const time_var = "time"
 
 #TODO
-#add aic, bic, and likelihood to output;
-#inverse hessian standard errors,
+#inverse hessian standard errors
 #start values to improve speed of convergence;
 fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we do not model E(Y|X,W)
                 link, #link function of fun-glmm
@@ -1532,7 +1551,7 @@ fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we 
                 constant_one,#exponential_function, #derivative of mu link
                 ordinal_order, #only needed for ordinal data
                 Fminbox(BFGS()), #type of optimizer
-                100 #number of bootstrap draws
+                10 #number of bootstrap draws
                 )
 
 estimated_parameters = fit["parameter"]
