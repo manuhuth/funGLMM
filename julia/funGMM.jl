@@ -1566,7 +1566,7 @@ end
 const sigma_mu = 1.0
 const lower_bound_gamma = -0.5
 const upper_bound_gamma = 0.5
-const number_individuals = 200
+const number_individuals = 300
 const min_time = -600
 const max_time = 811
 const weights_y_data = [1/3, 1/3, 1/3]
@@ -1599,7 +1599,7 @@ const ordinal_order = ["ordinal_1", "ordinal_2", "ordinal_3"]
 functional_covs["containment_1"]["Spain_1"]["data_frame"][!, "containment_index"] = functional_covs["containment_1"]["Spain_1"]["data_frame"][!, "containment_index"] * 100
 
 #simulate data
-Random.seed!(12)
+Random.seed!(123)
 simulated_data_dict = simulate_data(family, link, lower_bound_gamma, upper_bound_gamma,
                               number_individuals, min_time, max_time, number_gauss_legendre_points,
                               number_scalar_covariates, max_obs_per_individual, min_obs_per_individual,
@@ -1624,7 +1624,6 @@ const start_values_noise =  zeros(length(true_values)) .+ 0.01 #true_values + ra
 const time_var = "time"
 
 #TODO
-#inverse hessian standard errors
 #start values to improve speed of convergence;
 global analytical_standard_errors = true
 global bootstrap = nothing
@@ -1647,8 +1646,7 @@ fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we 
                 Fminbox(LBFGS()), #type of optimizer
                 bootstrap, #number of bootstrap draws
                 analytical_standard_errors, #compute analytical standard errors (currently inverse hessian; only if lambda equals zero)
-                "bic"
-                )
+                "bic")
 
 #only needed to construct pointwise convidence intervals
 global confidence_level = 0.05
