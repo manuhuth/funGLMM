@@ -47,8 +47,6 @@ function compute_random_starting_values_theta(family, link, ordinal_values_low_t
 
   return theta
 end
-
-
 #---------------Package functions-----------------------------------------------
 
 
@@ -607,8 +605,6 @@ function create_beta_dict(betas, length_betas)
   return dict_betas
 end
 
-
-
 #---------------method specific regression------------------------------------
 function create_numerical_ordinal_values(y, ordinal_values_low_to_high)
   y_cat = Array{Int}(undef, length(y))
@@ -1075,7 +1071,7 @@ function get_optimization_results(starting_values, length_alphas, scalar_covaria
                             name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
                             gauss_legendre_penalty_points,
                             link_sigma_mu, link_sigma_mu_derivative,
-                            lambda, parallel, optimizer=LBFGS())
+                            lambda, parallel, optimizer=LBFGS(), analytical_standard_errors=true)
 
   function f(theta, length_alphas, scalar_covariates, #f only needed to not use gradient -> otherwise dircetly get_wrapper_compute_objective_function_value
                               kappa, w_h, data_grouped, y_calc, length_betas_all,
@@ -1106,9 +1102,16 @@ function get_optimization_results(starting_values, length_alphas, scalar_covaria
                               link_sigma_mu, link_sigma_mu_derivative,
                               lambda, parallel, gauss_legendre_penalty_points), starting_values,
                               autodiff=:forward)
+  partial_f = theta -> f(theta, length_alphas, scalar_covariates,
+                              kappa, w_h, data_grouped, y_calc, length_betas_all,
+                              ordinal_values_low_to_high, t_variable, basis_type_weighting_betas,
+                              functional_covariates, functional_data, link, family,
+                              name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
+                              link_sigma_mu, link_sigma_mu_derivative,
+                              lambda, parallel, gauss_legendre_penalty_points)
 
-  fit = optimize(fn, #g!,
-                                      lower, upper, starting_values,
+  #compute outputs
+  fit = optimize(fn, lower, upper, starting_values,
                                       optimizer, Optim.Options(#show_trace = true, #show_every = 1,
                                       iterations=1000, g_tol = 10^(-6), f_tol = 10^(-20)))#,
                                       #store_trace=true, extended_trace=true, iterations = 3000))
@@ -1120,9 +1123,17 @@ function get_optimization_results(starting_values, length_alphas, scalar_covaria
                                                           name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
                                                           link_sigma_mu, link_sigma_mu_derivative,
                                                           lambda, parallel, gauss_legendre_penalty_points)[3]
+
+  if analytical_standard_errors
+    hessian = compute_hessian(partial_f, parameter)
+  else
+    hessian = nothing
+  end
+
   output = Dict("parameter" => parameter,
                 "log_likelihood" => -likelihood_value,
-                "fit" => fit)
+                "fit" => fit,
+                "hessian" => hessian)
 
   return output
 end
@@ -1130,11 +1141,12 @@ end
 
 function fun_glmm(formula, family, link, data, functional_data, beta_bases, starting_values,
                   i_variable = "id", t_variable = "time", n_gauss_hermite_quadrature_points_random_effect=20,
-                  n_gauss_legendre_points_functional_covariate=10, lambda=10,
+                  n_gauss_legendre_points_functional_covariate=10, lambda=0,
                   name_no_functional_group = "None", parallel_likelihood_evaluation=false,
                   link_sigma_mu = exponential_function, link_sigma_mu_derivative=exponential_function,
                   ordinal_values_low_to_high=nothing,
-                  optimizer=LBFGS(), bootstrap=nothing)
+                  optimizer=LBFGS(), bootstrap=nothing, analytical_standard_errors=true,
+                  cv_criterion="bic")
 
   #extract formula names to names of variables
   y_name = extract_dependent(formula)
@@ -1160,15 +1172,36 @@ function fun_glmm(formula, family, link, data, functional_data, beta_bases, star
 
 
   #obtain results of the penalized mll function
-  output = get_optimization_results(starting_values, length_alphas, scalar_covariates,
-                              kappa, w_h, data_grouped, y_calc, length_betas_all,
-                              ordinal_values_low_to_high, t_variable, beta_bases,
-                              functional_covariates, functional_data, link, family,
-                              name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
-                              gauss_legendre_penalty_points,
-                              link_sigma_mu, link_sigma_mu_derivative, lambda,
-                              parallel_likelihood_evaluation, optimizer)
+  lambda = get_number_as_array!(lambda)
 
+  save_cross_validation = Dict()
+  best_criterion_value = Inf
+  best_index = 0
+  for i in 1:length(lambda)
+
+    save_cross_validation["lambda_$(lambda[i])"] = get_optimization_results(starting_values, length_alphas, scalar_covariates,
+                                kappa, w_h, data_grouped, y_calc, length_betas_all,
+                                ordinal_values_low_to_high, t_variable, beta_bases,
+                                functional_covariates, functional_data, link, family,
+                                name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
+                                gauss_legendre_penalty_points,
+                                link_sigma_mu, link_sigma_mu_derivative,
+                                lambda[i],
+                                parallel_likelihood_evaluation, optimizer, analytical_standard_errors)
+
+    criterion_value = compute_criterion(cv_criterion, length(save_cross_validation["lambda_$(lambda[i])"]["parameter"]),
+                        nrow(data), save_cross_validation["lambda_$(lambda[i])"]["log_likelihood"])
+
+    if best_criterion_value > criterion_value
+      best_criterion_value = criterion_value
+      best_index = i
+    end
+  end
+
+  output = save_cross_validation["lambda_$(lambda[best_index])"]
+  output["cross_validation"] = save_cross_validation
+
+  output["lambda"] = lambda[best_index]
   output["aic"] = compute_aic(length(output["parameter"]), output["log_likelihood"])
   output["bic"] = compute_bic(length(output["parameter"]), nrow(data), output["log_likelihood"])
 
@@ -1181,8 +1214,13 @@ function fun_glmm(formula, family, link, data, functional_data, beta_bases, star
                                 functional_covariates, functional_data, link, family,
                                 name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
                                 gauss_legendre_penalty_points,
-                                link_sigma_mu, link_sigma_mu_derivative, lambda,
+                                link_sigma_mu, link_sigma_mu_derivative, lambda[best_index],
                                 parallel_likelihood_evaluation, optimizer, i_variable)
+   end
+
+   if analytical_standard_errors
+     output["inverse_hessian"] = compute_inverse_matrix(output["hessian"])
+     output["analytical_standard_errors"] = diag(output["inverse_hessian"]).^0.5
    end
 
    return output
@@ -1190,6 +1228,36 @@ function fun_glmm(formula, family, link, data, functional_data, beta_bases, star
 end
 
 #--------------------------Model evaluation-------------------------------------
+function get_number_as_array!(x)
+  if !check_if_array(x)
+    return [x]
+  elseif check_if_array(x)
+    return x
+  end
+end
+
+
+function check_if_array(x)
+  return x isa Array{<:Number,1}
+end
+
+function compute_inverse_matrix(M)
+
+  return inv(M)
+end
+
+function compute_hessian(f, x)
+  return ForwardDiff.hessian(f, x)
+end
+
+function compute_criterion(criterion, n_parameter, n_observations, log_likelihood)
+  if criterion == "bic"
+    return compute_bic(n_parameter, n_observations, log_likelihood)
+  elseif criterion == "aic"
+    return compute_aic(n_parameter, log_likelihood)
+  end
+end
+
 function compute_bic(n_parameter, n_observations, log_likelihood)
   return n_parameter*log(n_observations) - 2*log_likelihood
 end
@@ -1268,6 +1336,7 @@ end
 function sample_integers(mini, maxi, n, replacement)
   return sample([mini:maxi;], n, replace=replacement)
 end
+
 
 
 #-------------------------------Data Set simulation-----------------------------
@@ -1400,11 +1469,12 @@ function compute_s_from_differences(alphas)
   return d
 end
 
-#------------------------------Visualization (improve)--------------------------
+#------------------------------Visualization (improve)/ post-processing----------
 function plot_results(bases_betas,
-                      estimated_parameters, true_values, start_values, bootstrap_parameters,
+                      estimated_parameters, true_values, start_values, confidence_length,
+                      grid_delta=0.1,
                       level_confidence =0.05,
-                     link_function=identity_function)
+                     link_function=identity_function, title="")
   PP = []
 
   functional_covariates = collect(keys(bases_betas))
@@ -1414,26 +1484,20 @@ function plot_results(bases_betas,
     name_fc = functional_covariates[i]
     basis_ = bases_betas[name_fc]["basis"]
     length_betas[i] = length(basis_)
-    B = basismatrix(basis_, ( 1:bases_betas[functional_covariates[i]]["memory"]))
+    B = basismatrix(basis_, [0:grid_delta:bases_betas[functional_covariates[i]]["memory"];])
     index_start = Integer((sum(length_betas[1:(i-1)])))
     beta_est = B * estimated_parameters[(index_start+1):(index_start+length(basis_))]
     beta_true = B * true_values[(index_start+1):(index_start+length(basis_))]
     beta_start = B * start_values[(index_start+1):(index_start+length(basis_))]
 
-    bootstrap_results = B*bootstrap_parameters[:, (index_start+1):(index_start+length(basis_))]'
-    row_means = mean(bootstrap_results, dims=2)
-    row_sd = (var(bootstrap_results, dims=2)).^0.5
-    k = quantile(Normal(0.0, 1.0),level_confidence/2)
-    lower = (k .* row_sd)
-
-    push!(PP, plot(hcat(beta_est, beta_true, beta_start),
-         ribbon=hcat(lower, zeros(length(beta_true)),zeros(length(beta_start)) ),
+    push!(PP, plot([0:grid_delta:bases_betas[functional_covariates[i]]["memory"];], hcat(beta_est, beta_true, beta_start),
+         ribbon=hcat(confidence_length, zeros(length(beta_true)), zeros(length(beta_start)) ),
          fc=:steelblue, fa=0.2,
          linewidth = 1.5,
           xlabel = "Time", ylabel="Beta function $name_fc",
           labels=["Estimated" "True function" "Start function"]) )
   end
-  plot(PP...; size = default(:size) .* (1, length(functional_covariates)),
+  plot(PP...; title=title, size = default(:size) .* (1, length(functional_covariates)),
    layout = (length(functional_covariates), 1), left_margin = 5Plots.mm)
 end
 
@@ -1462,10 +1526,38 @@ function plot_results_confidence_intervals(bases_betas,
   plot(hcat(beta_est, beta_true),
           xlabel = "Time", ylabel="Beta function $name_fc", color="steelblue", alpha = 0.7,
       )
-
 end
 
+function compute_pointwise_confidence_function_analytically(basis, parameter, variance_covariance_matrix, grid_delta=0.1,
+         level_confidence=0.05)
+  grid = [breakpoints(basis)[1]:grid_delta:last(breakpoints(basis));]
+  B = basismatrix(basis, grid)
+  function_values = B * parameter
+  vcv_time_points = B * variance_covariance_matrix * B'
+  standard_errors = diag(vcv_time_points).^0.5
+  k = quantile(Normal(0.0, 1.0),level_confidence/2)
+  lower_bound = - standard_errors .* k .+ function_values
+  upper_bound = standard_errors .* k .+ function_values
 
+  output = Dict("function" => function_values,
+                "lower_bound" => lower_bound,
+                "upper_bound" => upper_bound,
+                "level_confidence" => level_confidence,
+                "variance_covariance_time_points" => vcv_time_points)
+
+  return  output
+end
+
+function compute_pointwise_confidence_function_bootstrap(basis, parameter, bootstrap_results, grid_delta=0.1, level_confidence=0.05)
+  grid = [breakpoints(basis)[1]:grid_delta:last(breakpoints(basis));]
+  B = basismatrix(basis, grid)
+  bootstrap_results = B*bootstrap_results[:, 1:length(basis)]'
+  row_sd = (var(bootstrap_results, dims=2)).^0.5
+  k = quantile(Normal(0.0, 1.0),level_confidence/2)
+  output = (k .* row_sd)
+
+  return output
+end
 
 
 #--------------------------------Test algorithms--------------------------------
@@ -1474,7 +1566,7 @@ end
 const sigma_mu = 1.0
 const lower_bound_gamma = -0.5
 const upper_bound_gamma = 0.5
-const number_individuals = 5000
+const number_individuals = 200
 const min_time = -600
 const max_time = 811
 const weights_y_data = [1/3, 1/3, 1/3]
@@ -1534,6 +1626,8 @@ const time_var = "time"
 #TODO
 #inverse hessian standard errors
 #start values to improve speed of convergence;
+global analytical_standard_errors = true
+global bootstrap = nothing
 fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we do not model E(Y|X,W)
                 link, #link function of fun-glmm
                 simulated_data_dict["data"], #data on individuals (ordinary panel set)
@@ -1542,29 +1636,48 @@ fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we 
                 start_values_noise, #starting values; find nice start
                 "id", #name of individual column
                 time_var, #name of time column
-                10, #number of gauss hermite qudrature points
+                4, #number of gauss hermite qudrature points
                 number_gauss_legendre_points, #number of gauss legendre points
-                0, #lambda penalty / penalty is currently in gradient missing
+                0, #lambda penalty / penalty is currently in analytical gradient missing; if array cross-validation is performed
                 "None", #name of no
                 true, #parallel "likelihood evaluation -> remove option and only do bootstrap parallel
                 identity_function,#exponential_function, #link of mu -> estimate ln(mu)
                 constant_one,#exponential_function, #derivative of mu link
                 ordinal_order, #only needed for ordinal data
-                Fminbox(BFGS()), #type of optimizer
-                10 #number of bootstrap draws
+                Fminbox(LBFGS()), #type of optimizer
+                bootstrap, #number of bootstrap draws
+                analytical_standard_errors, #compute analytical standard errors (currently inverse hessian; only if lambda equals zero)
+                "bic"
                 )
 
-estimated_parameters = fit["parameter"]
-plot_results(bases_betas, estimated_parameters, true_values,
- start_values_noise, fit["bootstrap"], 0.05, identity_function)
+#only needed to construct pointwise convidence intervals
+global confidence_level = 0.05
+global grid_length = 0.1
+
+if analytical_standard_errors
+  analytical_confidence_intervals = compute_pointwise_confidence_function_analytically(basis, fit["parameter"][1:length(basis)],
+                                                     fit["inverse_hessian"][1:length(basis), 1:length(basis)], grid_length, confidence_level)
+
+  plot_results(bases_betas, fit["parameter"], true_values, #analytical
+   start_values_noise, analytical_confidence_intervals["upper_bound"] - analytical_confidence_intervals["function"],
+     grid_length, confidence_level, identity_function, "Analytical standard errors")
+  savefig("/home/manuel/Documents/fun_glm/beta_est_analytic_se.png")
+end
+
+if !isnothing(bootstrap)
+  bootstrap_confidence_intervals = compute_pointwise_confidence_function_bootstrap(basis, fit["parameter"][1:length(basis)],
+                                                      fit["bootstrap"][:, 1:length(basis)], grid_length, confidence_level)
+
+  plot_results(bases_betas, fit["parameter"], true_values, #analytical
+     start_values_noise, bootstrap_confidence_intervals,
+     grid_length, confidence_level, identity_function, "Bootstrap standard errors")
+  savefig("/home/manuel/Documents/fun_glm/beta_est_bootstrap.png")
+end
+
 savefig("/home/manuel/Documents/fun_glm/beta_est_many_ind.png")
 
-
-a = start_values_noise - estimated_parameters
-b = true_values - estimated_parameters
-
-
-
+a = start_values_noise - fit["parameter"]
+b = true_values - fit["parameter"]
 
 
 #-------------------Debugging-------------------------------------------
