@@ -1566,10 +1566,10 @@ end
 const sigma_mu = 1.0
 const lower_bound_gamma = -0.5
 const upper_bound_gamma = 0.5
-const number_individuals = 300
+const number_individuals = 10000
 const min_time = -600
 const max_time = 811
-const weights_y_data = [1/3, 1/3, 1/3]
+const weights_y_data = repeat([1/5], 5)
 const max_obs_per_individual = 4
 const min_obs_per_individual = 4
 const variance_scalar_covariates = 1
@@ -1580,7 +1580,7 @@ const number_scalar_covariates = 2
 const family = "ordinal"
 const link = "logit"
 const number_gauss_legendre_points = 10
-const basis = BSplineBasis(3, [0:15:30;])
+const basis = BSplineBasis(4, [0:10:30;])
 
 const bases_betas = Dict("containment_1" => Dict("basis" => basis, #specify types of contiunous beta coefficients
                                               "link_function" => identity_function,#logistic_function,
@@ -1595,11 +1595,11 @@ const bases_betas = Dict("containment_1" => Dict("basis" => basis, #specify type
 const functional_covs = delete!(add_min_max_time(load_functional_test_data_dict("/home/manuel/Documents/fun_glm/test_data/",
                  ["Spain"], 4, [1:18:811;],
                  log, 2, "time", "containment_index"), "time"), "containment_2")
-const ordinal_order = ["ordinal_1", "ordinal_2", "ordinal_3"]
+const ordinal_order = ["ordinal_1", "ordinal_2", "ordinal_3", "ordinal_4", "ordinal_5"]
 functional_covs["containment_1"]["Spain_1"]["data_frame"][!, "containment_index"] = functional_covs["containment_1"]["Spain_1"]["data_frame"][!, "containment_index"] * 100
 
 #simulate data
-Random.seed!(123)
+Random.seed!(1234567)
 simulated_data_dict = simulate_data(family, link, lower_bound_gamma, upper_bound_gamma,
                               number_individuals, min_time, max_time, number_gauss_legendre_points,
                               number_scalar_covariates, max_obs_per_individual, min_obs_per_individual,
@@ -1637,7 +1637,7 @@ fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we 
                 time_var, #name of time column
                 4, #number of gauss hermite qudrature points
                 number_gauss_legendre_points, #number of gauss legendre points
-                0, #lambda penalty / penalty is currently in analytical gradient missing; if array cross-validation is performed
+                [0:0.5:5;], #lambda penalty / penalty is currently in analytical gradient missing; if array model selection is performed
                 "None", #name of no
                 true, #parallel "likelihood evaluation -> remove option and only do bootstrap parallel
                 identity_function,#exponential_function, #link of mu -> estimate ln(mu)
@@ -1648,7 +1648,7 @@ fit = fun_glmm(formula, family, #family -> for ordinal not really true cause we 
                 analytical_standard_errors, #compute analytical standard errors (currently inverse hessian; only if lambda equals zero)
                 "bic")
 
-#only needed to construct pointwise convidence intervals
+#only needed to construct pointwise confidence intervals
 global confidence_level = 0.05
 global grid_length = 0.1
 
@@ -1676,87 +1676,3 @@ savefig("/home/manuel/Documents/fun_glm/beta_est_many_ind.png")
 
 a = start_values_noise - fit["parameter"]
 b = true_values - fit["parameter"]
-
-
-#-------------------Debugging-------------------------------------------
-y_name = extract_dependent(formula)
-functional_covariates, scalar_covariates = extract_X_names(formula)
-data = simulated_data_dict["data"]
-ordinal_values_low_to_high = ordinal_order
-beta_bases = bases_betas
-i_variable = "id"
-t_variable = "time"
-functional_data = functional_covs
-
-#model pre-processing if ordinal_logistic
-if get_if_ordinal_logistic(family, link)
-  data[!, "y_cat"] = create_numerical_ordinal_values(data[!, y_name], ordinal_values_low_to_high)
-end
-#get name of y_variable (changes if ordinal logistic)
-y_calc = get_y_calc(family, y_name)
-
-#get length of covariate parameters to optimize over
-length_betas_all = compute_beta_basis_lengths(functional_covariates, beta_bases)
-length_alphas = get_length_alphas(family, link, ordinal_values_low_to_high)
-n_gauss_hermite_quadrature_points_random_effect = 10
-n_gauss_legendre_points_functional_covariate = 10
-#get all needed quadrature points
-kappa, w_h = gausshermite(n_gauss_hermite_quadrature_points_random_effect)
-gauss_legendre_points, w_gauss_legendre = gausslegendre(n_gauss_legendre_points_functional_covariate)
-gauss_legendre_penalty_points = compute_gauss_legendre_penalty_points(beta_bases)
-
-data_grouped = groupby(data, i_variable) #group by individuals
-
-theta = true_values
-
-
-link_sigma_mu = identity_function
-link_sigma_mu_derivative = constant_one
-lambda = 0
-name_no_functional_group = "None"
-an = theta -> get_wrapper_compute_objective_function_value(theta, length_alphas, scalar_covariates,
-                            kappa, w_h, data_grouped, y_calc, length_betas_all,
-                            ordinal_values_low_to_high, t_variable, bases_betas,
-                            functional_covariates, functional_data, link, family,
-                            name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
-                            link_sigma_mu, link_sigma_mu_derivative,
-                            lambda, true, gauss_legendre_penalty_points)[1]
-
-g = x -> ForwardDiff.gradient(an, start_values_noise);
-
-g(start_values_noise)
-
-theta_mod = copy(theta)
-k =2
-theta_mod[k] = theta[k] + 10
-bn= theta -> get_wrapper_compute_objective_function_value(theta_mod, length_alphas, scalar_covariates,
-                            kappa, w_h, data_grouped, y_calc, length_betas_all,
-                            ordinal_values_low_to_high, t_variable, bases_betas,
-                            functional_covariates, functional_data, link, family,
-                            name_no_functional_group, gauss_legendre_points, w_gauss_legendre,
-                            link_sigma_mu, link_sigma_mu_derivative,
-                            lambda, true, gauss_legendre_penalty_points)
-
-
-
-length_betas = sum(values(length_betas_all))
-length_gammas = length(scalar_covariates)
-alpha_1_and_s = theta[(length_betas+length_gammas+1):(length_betas+length_gammas+length_alphas)]
-betas = theta[1:length_betas]
-gammas = theta[(length_betas+1):(length_betas+length_gammas)]
-alphas = get_alpha_from_s_and_alpha_1(alpha_1_and_s[2:length(alpha_1_and_s)], alpha_1_and_s[1])
-zeta = last(theta)
-transformed_sigma_mu = link_sigma_mu(zeta)
-beta_parameter_dict = create_beta_dict(betas, length_betas_all)
-basis_type_weighting_betas = bases_betas
-
-compute_negative_log_likelihood_value_parallel(kappa, w_h, data_grouped, y_calc,
-            ordinal_values_low_to_high, alphas, link_sigma_mu(transformed_sigma_mu), t_variable, basis_type_weighting_betas,
-            beta_parameter_dict, functional_covariates, functional_data, gammas, link, family,
-            name_no_functional_group, gauss_legendre_points, w_gauss_legendre, scalar_covariates,
-            length_betas_all, link_sigma_mu_derivative, transformed_sigma_mu)
-
-
-Threads.@threads for i in 1:40
-  println(rand(Uniform(-5, 5), 1))
-end
